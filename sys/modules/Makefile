@@ -396,6 +396,7 @@ SUBDIR=	\
 	${_speaker} \
 	spi \
 	${_splash} \
+	squashfs \
 	ste \
 	stge \
 	${_sume} \
