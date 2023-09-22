@@ -3572,6 +3572,15 @@ fs/smbfs/smbfs_smb.c		optional smbfs
 fs/smbfs/smbfs_subr.c		optional smbfs
 fs/smbfs/smbfs_vfsops.c		optional smbfs
 fs/smbfs/smbfs_vnops.c		optional smbfs
+fs/squashfs/squashfs_block.c	optional squashfs
+fs/squashfs/squashfs_decompressor.c	optional squashfs
+fs/squashfs/squashfs_dir.c	optional squashfs
+fs/squashfs/squashfs_file.c	optional squashfs
+fs/squashfs/squashfs_inode.c	optional squashfs
+fs/squashfs/squashfs_io.c	optional squashfs
+fs/squashfs/squashfs_vfsops.c	optional squashfs
+fs/squashfs/squashfs_vnops.c	optional squashfs
+fs/squashfs/squashfs_xattr.c	optional squashfs
 fs/tarfs/tarfs_io.c		optional tarfs compile-with "${NORMAL_C} -I$S/contrib/zstd/lib/freebsd"
 fs/tarfs/tarfs_subr.c		optional tarfs
 fs/tarfs/tarfs_vfsops.c		optional tarfs
