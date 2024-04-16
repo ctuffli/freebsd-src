@@ -246,6 +246,9 @@ int bsd_to_linux_signal(int sig);
 void linux_dev_shm_create(void);
 void linux_dev_shm_destroy(void);
 
+void linux_dev_nvme_create(void);
+void linux_dev_nvme_destroy(void);
+
 /*
  * mask=0 is not sensible for this application, so it will be taken to mean
  * a mask equivalent to the value.  Otherwise, (word & mask) == value maps to

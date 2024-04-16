@@ -53,6 +53,7 @@ linux_common_modevent(module_t mod, int type, void *data)
 		linux_check_errtbl();
 #endif
 		linux_dev_shm_create();
+		linux_dev_nvme_create();
 		linux_osd_jail_register();
 		SET_FOREACH(ldhp, linux_device_handler_set)
 			linux_device_register_handler(*ldhp);
@@ -60,6 +61,7 @@ linux_common_modevent(module_t mod, int type, void *data)
 		break;
 	case MOD_UNLOAD:
 		linux_dev_shm_destroy();
+		linux_dev_nvme_destroy();
 		linux_osd_jail_deregister();
 		SET_FOREACH(ldhp, linux_device_handler_set)
 			linux_device_unregister_handler(*ldhp);

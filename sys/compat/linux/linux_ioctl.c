@@ -71,6 +71,7 @@
 #include <compat/linux/linux_common.h>
 #include <compat/linux/linux_ioctl.h>
 #include <compat/linux/linux_mib.h>
+#include <compat/linux/linux_nvme.h>
 #include <compat/linux/linux_socket.h>
 #include <compat/linux/linux_time.h>
 #include <compat/linux/linux_util.h>
@@ -82,6 +83,9 @@
 #include <compat/linux/linux_videodev2_compat.h>
 
 #include <cam/scsi/scsi_sg.h>
+
+#include <dev/nvme/nvme.h>
+#include <dev/nvme/nvme_private.h>
 
 #define	DEFINE_LINUX_IOCTL_SET(shortname, SHORTNAME)		\
 static linux_ioctl_function_t linux_ioctl_ ## shortname;	\
@@ -108,6 +112,7 @@ DEFINE_LINUX_IOCTL_SET(v4l2, VIDEO2);
 DEFINE_LINUX_IOCTL_SET(fbsd_usb, FBSD_LUSB);
 DEFINE_LINUX_IOCTL_SET(evdev, EVDEV);
 DEFINE_LINUX_IOCTL_SET(kcov, KCOV);
+DEFINE_LINUX_IOCTL_SET(nvme, NVME);
 
 #undef DEFINE_LINUX_IOCTL_SET
 
@@ -3529,6 +3534,51 @@ linux_ioctl_kcov(struct thread *td, struct linux_ioctl_args *args)
 	if (error == 0)
 		error = sys_ioctl(td, (struct ioctl_args *)args);
 	return (error);
+}
+
+static int
+linux_ioctl_nvme(struct thread *td, struct linux_ioctl_args *args)
+{
+	cap_rights_t rights;
+	struct file *fp;
+	u_long cmd;
+	caddr_t arg = NULL;
+	struct nvme_get_nsid gnsid = { { 0 } };
+	int err = 0;
+
+	err = fget(td, args->fd, cap_rights_init(&rights, CAP_IOCTL), &fp);
+	if (err != 0)
+		return (err);
+	cmd = args->cmd & UINT16_MAX;
+
+	switch (cmd) {
+	case LINUX_NVME_IOCTL_ID:
+		err = fo_ioctl(fp, NVME_GET_NSID, &gnsid, td->td_ucred, td);
+		if (err == 0)
+			td->td_retval[0] = gnsid.nsid;
+		break;
+	case LINUX_NVME_IOCTL_ADMIN_CMD:
+	case LINUX_NVME_IOCTL_SUBMIT_IO:
+	case LINUX_NVME_IOCTL_IO_CMD:
+		err = linux_nvme_do_cmd(fp, (struct nvme_passthru_cmd *)args->arg, cmd);
+		break;
+	case LINUX_NVME_IOCTL_RESET:
+		err = fo_ioctl(fp, NVME_RESET_CONTROLLER, arg, td->td_ucred, td);
+		break;
+	case LINUX_NVME_IOCTL_SUBSYS_RESET:
+		printf("got LINUX_NVME_IOCTL_SUBSYS_RESET\n");
+		return (EOPNOTSUPP);
+		break;
+	case LINUX_NVME_IOCTL_RESCAN:
+		printf("got LINUX_NVME_IOCTL_RESCAN\n");
+		return (EOPNOTSUPP);
+		break;
+	default:
+		printf("unknown command %#lx\n", cmd);
+		return (EINVAL);
+	}
+
+	return (err);
 }
 
 /*
