@@ -100,6 +100,10 @@ uint16_t cpu_cores, cpu_sockets, cpu_threads;
 
 int raw_stdio = 0;
 
+#ifdef BHYVE_SNAPSHOT
+char *restore_file;
+#endif
+
 static const int BSP = 0;
 
 static cpuset_t cpumask;
@@ -589,6 +593,7 @@ bhyve_parse_config_option(const char *option)
 	if (path == NULL)
 		err(4, "Failed to allocate memory");
 	set_config_value(path, value + 1);
+	free(path);
 	return (true);
 }
 
@@ -656,10 +661,7 @@ main(int argc, char *argv[])
 	size_t memsize;
 	const char *value, *vmname;
 #ifdef BHYVE_SNAPSHOT
-	char *restore_file;
 	struct restore_state rstate;
-
-	restore_file = NULL;
 #endif
 
 	bhyve_init_config();

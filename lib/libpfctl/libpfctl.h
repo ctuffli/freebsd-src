@@ -62,7 +62,7 @@ struct pfctl_status {
 	struct pfctl_status_counters	 lcounters;
 	struct pfctl_status_counters	 fcounters;
 	struct pfctl_status_counters	 scounters;
-	uint64_t	pcounters[2][2][3];
+	uint64_t	pcounters[2][2][2];
 	uint64_t	bcounters[2][2];
 };
 
@@ -390,8 +390,10 @@ struct pfctl_syncookies {
 struct pfctl_handle;
 struct pfctl_handle	*pfctl_open(const char *pf_device);
 void	pfctl_close(struct pfctl_handle *);
+int	pfctl_fd(struct pfctl_handle *);
 
 int	pfctl_startstop(struct pfctl_handle *h, int start);
+struct pfctl_status* pfctl_get_status_h(struct pfctl_handle *h);
 struct pfctl_status* pfctl_get_status(int dev);
 uint64_t pfctl_status_counter(struct pfctl_status *status, int id);
 uint64_t pfctl_status_lcounter(struct pfctl_status *status, int id);
@@ -410,9 +412,15 @@ int	pfctl_get_eth_rule(int dev, uint32_t nr, uint32_t ticket,
 	    char *anchor_call);
 int	pfctl_add_eth_rule(int dev, const struct pfctl_eth_rule *r,
 	    const char *anchor, const char *anchor_call, uint32_t ticket);
+int	pfctl_get_rules_info_h(struct pfctl_handle *h,
+	    struct pfctl_rules_info *rules, uint32_t ruleset,
+	    const char *path);
 int	pfctl_get_rules_info(int dev, struct pfctl_rules_info *rules,
 	    uint32_t ruleset, const char *path);
 int	pfctl_get_rule(int dev, uint32_t nr, uint32_t ticket,
+	    const char *anchor, uint32_t ruleset, struct pfctl_rule *rule,
+	    char *anchor_call);
+int	pfctl_get_rule_h(struct pfctl_handle *h, uint32_t nr, uint32_t ticket,
 	    const char *anchor, uint32_t ruleset, struct pfctl_rule *rule,
 	    char *anchor_call);
 int	pfctl_get_clear_rule(int dev, uint32_t nr, uint32_t ticket,

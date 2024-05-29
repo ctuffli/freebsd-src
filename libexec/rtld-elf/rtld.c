@@ -1520,18 +1520,6 @@ digest_dynamic1(Obj_Entry *obj, int early, const Elf_Dyn **dyn_rpath,
 		    obj->static_tls = true;
 	    break;
 
-#ifdef __powerpc__
-#ifdef __powerpc64__
-	case DT_PPC64_GLINK:
-		obj->glink = (Elf_Addr)(obj->relocbase + dynp->d_un.d_ptr);
-		break;
-#else
-	case DT_PPC_GOT:
-		obj->gotptr = (Elf_Addr *)(obj->relocbase + dynp->d_un.d_ptr);
-		break;
-#endif
-#endif
-
 	case DT_FLAGS_1:
 		if (dynp->d_un.d_val & DF_1_NOOPEN)
 		    obj->z_noopen = true;
@@ -1554,6 +1542,9 @@ digest_dynamic1(Obj_Entry *obj, int early, const Elf_Dyn **dyn_rpath,
 	    break;
 
 	default:
+	    if (arch_digest_dynamic(obj, dynp))
+		break;
+
 	    if (!early) {
 		dbg("Ignoring d_tag %ld = %#lx", (long)dynp->d_tag,
 		    (long)dynp->d_tag);
@@ -6157,10 +6148,42 @@ parse_args(char* argv[], int argc, bool *use_pathp, int *fdp,
 				*fdp = fd;
 				seen_f = true;
 				break;
+			} else if (opt == 'o') {
+				struct ld_env_var_desc *l;
+				char *n, *v;
+				u_int ll;
+
+				if (j != arglen - 1) {
+					_rtld_error("Invalid options: %s", arg);
+					rtld_die();
+				}
+				i++;
+				n = argv[i];
+				v = strchr(n, '=');
+				if (v == NULL) {
+					_rtld_error("No '=' in -o parameter");
+					rtld_die();
+				}
+				for (ll = 0; ll < nitems(ld_env_vars); ll++) {
+					l = &ld_env_vars[ll];
+					if (v - n == (ptrdiff_t)strlen(l->n) &&
+					    strncmp(n, l->n, v - n) == 0) {
+						l->val = v + 1;
+						break;
+					}
+				}
+				if (ll == nitems(ld_env_vars)) {
+					_rtld_error("Unknown LD_ option %s",
+					    n);
+					rtld_die();
+				}
 			} else if (opt == 'p') {
 				*use_pathp = true;
 			} else if (opt == 'u') {
-				trust = false;
+				u_int ll;
+
+				for (ll = 0; ll < nitems(ld_env_vars); ll++)
+					ld_env_vars[ll].val = NULL;
 			} else if (opt == 'v') {
 				machine[0] = '\0';
 				mib[0] = CTL_HW;
@@ -6240,6 +6263,7 @@ print_usage(const char *argv0)
 	    "  -b <exe>  Execute <exe> instead of <binary>, arg0 is <binary>\n"
 	    "  -d        Ignore lack of exec permissions for the binary\n"
 	    "  -f <FD>   Execute <FD> instead of searching for <binary>\n"
+	    "  -o <OPT>=<VAL> Set LD_<OPT> to <VAL>, without polluting env\n"
 	    "  -p        Search in PATH for named binary\n"
 	    "  -u        Ignore LD_ environment variables\n"
 	    "  -v        Display identification information\n"
