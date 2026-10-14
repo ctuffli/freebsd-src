@@ -1439,6 +1439,93 @@ vmbus_pcib_prepopulate_bars(struct hv_pcibus *hbus)
 	mtx_unlock(&hbus->device_list_lock);
 }
 
+#define ADDR_32BIT_END		(~(uint32_t)0)
+#define ADDR_64BIT_START	((uint64_t)1 << 32)
+#define ADDR_64BIT_END		(~(uint64_t)0)
+
+/*
+ * Assign BAR values to all devices
+ */
+static void
+vmbus_pcib_assign_bars(struct hv_pcibus *hbus)
+{
+	struct hv_pci_dev *hpdev;
+	struct resource **rsrc;
+	uint32_t n_rsrc = 0;
+	int rid = 1; 	/* Skip rid=0 used by the bus itself */
+	int b;
+
+	mtx_lock(&hbus->device_list_lock);
+	TAILQ_FOREACH(hpdev, &hbus->children, link)
+		n_rsrc += MAX_NUM_BARS;
+	if (n_rsrc == 0)
+		goto out;
+
+	/* leave an empty slot for parent bus' resource */
+	n_rsrc++;
+
+	rsrc = mallocarray(n_rsrc, sizeof(struct resource *), M_TEMP,
+	    M_ZERO | M_NOWAIT);
+	if (rsrc == NULL) {
+		device_printf(hbus->pcib, "failed to allocate %d resource\n", n_rsrc);
+		goto out;
+	}
+	if (bootverbose)
+		device_printf(hbus->pcib, "allocated %d resources\n", n_rsrc);
+
+	TAILQ_FOREACH(hpdev, &hbus->children, link) {
+		uint64_t probed, membase;
+		uint64_t start, end, size;
+		uint32_t command;
+		bool is64bit;
+
+		/* Apparently, Hyper-V ignores BAR updates with memory enabled */
+		_hv_pcifront_read_config(hpdev, PCIR_COMMAND, 2, &command);
+		command &= ~PCIM_CMD_MEMEN;
+		_hv_pcifront_write_config(hpdev, PCIR_COMMAND, 2, command);
+
+		for (b = 0; b < MAX_NUM_BARS; b++) {
+			if (hpdev->probed_bar[b] == 0)
+				continue;
+			probed = hpdev->probed_bar[b];
+
+			is64bit = (probed & PCIM_BAR_MEM_TYPE) == PCIM_BAR_MEM_64;
+			if (is64bit) {
+				probed |= (uint64_t)(hpdev->probed_bar[b + 1]) << 32;
+				start = ADDR_64BIT_START;
+				end = ADDR_64BIT_END;
+			} else {
+				start = 0;
+				end = ADDR_32BIT_END;
+			}
+			size = 1ULL << pci_mapsize(probed);
+
+			rsrc[rid] = bus_alloc_resource(hbus->pcib, SYS_RES_MEMORY, rid, start, end,
+			    size, rman_make_alignment_flags(size));
+			if (rsrc[rid] == NULL) {
+				device_printf(hbus->pcib, "cannot reserve %#jx bytes for BAR %d\n",
+				    size, b);
+				continue;
+			}
+			membase = rman_get_start(rsrc[rid]);
+			_hv_pcifront_write_config(hpdev, PCIR_BAR(b), 4, membase);
+			if (is64bit) {
+				b++;
+				_hv_pcifront_write_config(hpdev, PCIR_BAR(b), 4, membase >> 32);
+			}
+			rid++;
+		}
+	}
+
+	for (b = 0; b < n_rsrc; b++) {
+		if (rsrc[b] != NULL)
+			bus_release_resource(hbus->pcib, rsrc[b]);
+	}
+	free(rsrc, M_TEMP);
+out:
+	mtx_unlock(&hbus->device_list_lock);
+}
+
 static void
 vmbus_pcib_set_detaching(void *arg, int pending __unused)
 {
@@ -1564,6 +1651,7 @@ vmbus_pcib_attach(device_t dev)
 		goto vmbus_close;
 
 	vmbus_pcib_prepopulate_bars(hbus);
+	vmbus_pcib_assign_bars(hbus);
 
 	hbus->pci_bus = device_add_child(dev, "pci", DEVICE_UNIT_ANY);
 	if (!hbus->pci_bus) {
