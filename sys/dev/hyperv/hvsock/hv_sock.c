@@ -177,7 +177,7 @@ set_port_by_srv_id(struct hyperv_guid *srv_id, unsigned int port)
 static void
 __hvs_remove_pcb_from_list(struct hvs_pcb *pcb, unsigned char list)
 {
-	struct hvs_pcb *p = NULL;
+	struct hvs_pcb *p = NULL, *ptmp;
 
 	HVSOCK_DBG(HVSOCK_DBG_VERBOSE, "%s: pcb is %p\n", __func__, pcb);
 
@@ -185,13 +185,13 @@ __hvs_remove_pcb_from_list(struct hvs_pcb *pcb, unsigned char list)
 		return;
 
 	if (list & HVS_LIST_BOUND) {
-		LIST_FOREACH(p, &hvs_trans_bound_socks, bound_next)
+		LIST_FOREACH_SAFE(p, &hvs_trans_bound_socks, bound_next, ptmp)
 			if  (p == pcb)
 				LIST_REMOVE(p, bound_next);
 	}
 
 	if (list & HVS_LIST_CONNECTED) {
-		LIST_FOREACH(p, &hvs_trans_connected_socks, connected_next)
+		LIST_FOREACH_SAFE(p, &hvs_trans_connected_socks, connected_next, ptmp)
 			if (p == pcb)
 				LIST_REMOVE(pcb, connected_next);
 	}
