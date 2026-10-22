@@ -1249,7 +1249,8 @@ hvsock_canread_check(struct hvs_pcb *pcb)
 	int error;
 
 	if (pcb == NULL || pcb->chan == NULL) {
-		pcb->so->so_error = EIO;
+		if (pcb != NULL && pcb->so != NULL)
+			pcb->so->so_error = EIO;
 		return (0);
 	}
 
