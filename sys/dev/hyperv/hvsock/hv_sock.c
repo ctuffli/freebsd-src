@@ -30,6 +30,7 @@
 #include <sys/bus.h>
 #include <sys/domain.h>
 #include <sys/lock.h>
+#include <sys/poll.h>
 #include <sys/kernel.h>
 #include <sys/types.h>
 #include <sys/malloc.h>
@@ -99,6 +100,7 @@ static struct protosw hv_socket_protosw = {
 	.pr_sockaddr =		hvs_trans_sockaddr,
 	.pr_soreceive =		hvs_trans_soreceive,
 	.pr_sosend =		hvs_trans_sosend,
+	.pr_sopoll =		hvs_trans_sopoll,
 	.pr_disconnect =	hvs_trans_disconnect,
 	.pr_close =		hvs_trans_close,
 	.pr_detach =		hvs_trans_detach,
@@ -874,6 +876,79 @@ out:
 	SOCK_IO_SEND_UNLOCK(so);
 
 	return (error);
+}
+
+int
+hvs_trans_sopoll(struct socket *so, int events, struct thread *td)
+{
+	struct hvs_pcb *pcb;
+	int revents;
+
+	HVSOCK_DBG(HVSOCK_DBG_VERBOSE,
+	    "%s: HyperV Socket hvs_trans_sopoll called\n", __func__);
+
+	(void) hvs_trans_lock();
+	SOCK_LOCK(so);
+	if (SOLISTENING(so)) {
+		if (!(events & (POLLIN | POLLRDNORM)))
+			revents = 0;
+		else if (!TAILQ_EMPTY(&so->sol_comp))
+			revents = events & (POLLIN | POLLRDNORM);
+		else if ((events & POLLINIGNEOF) == 0 && so->so_error)
+			revents = (events & (POLLIN | POLLRDNORM)) | POLLHUP;
+		else {
+			selrecord(td, &so->so_rdsel);
+			revents = 0;
+		}
+	} else {
+		pcb = so2hvspcb(so);
+		if (pcb == NULL) {
+			revents = POLLERR;
+			goto out;
+		}
+
+		revents = 0;
+		SOCK_SENDBUF_LOCK(so);
+		SOCK_RECVBUF_LOCK(so);
+		if (events & (POLLIN | POLLRDNORM))
+			if (hvsock_poll_readable(pcb) || so->so_error || so->so_rerror)
+				revents |= events & (POLLIN | POLLRDNORM);
+		if (events & (POLLOUT | POLLWRNORM))
+			if (hvsock_canwrite_check(pcb) > 0 ||
+			    (so->so_snd.sb_state & SBS_CANTSENDMORE) || so->so_error)
+				revents |= events & (POLLOUT | POLLWRNORM);
+		if (events & (POLLPRI | POLLRDBAND))
+			if (so->so_oobmark ||
+			    (so->so_rcv.sb_state & SBS_RCVATMARK))
+				revents |= events & (POLLPRI | POLLRDBAND);
+		if ((events & POLLINIGNEOF) == 0) {
+			if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
+				revents |= events & (POLLIN | POLLRDNORM);
+				if (so->so_snd.sb_state & SBS_CANTSENDMORE)
+					revents |= POLLHUP;
+			}
+		}
+		if (so->so_rcv.sb_state & SBS_CANTRCVMORE)
+			revents |= events & POLLRDHUP;
+		if (revents == 0) {
+			if (events &
+			    (POLLIN | POLLPRI | POLLRDNORM | POLLRDBAND | POLLRDHUP)) {
+				selrecord(td, &so->so_rdsel);
+				so->so_rcv.sb_flags |= SB_SEL;
+			}
+			if (events & (POLLOUT | POLLWRNORM)) {
+				selrecord(td, &so->so_wrsel);
+				so->so_snd.sb_flags |= SB_SEL;
+			}
+		}
+		SOCK_RECVBUF_UNLOCK(so);
+		SOCK_SENDBUF_UNLOCK(so);
+	}
+out:
+	SOCK_UNLOCK(so);
+	hvs_trans_unlock();
+
+	return (revents);
 }
 
 int

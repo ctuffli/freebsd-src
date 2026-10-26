@@ -109,6 +109,7 @@ int	hvs_trans_soreceive(struct socket *, struct sockaddr **,
 	    struct uio *, struct mbuf **, struct mbuf **, int *);
 int	hvs_trans_sosend(struct socket *, struct sockaddr *, struct uio *,
 	     struct mbuf *, struct mbuf *, int, struct thread *);
+int	hvs_trans_sopoll(struct socket *, int, struct thread *);
 int	hvs_trans_disconnect(struct socket *);
 int	hvs_trans_shutdown(struct socket *, enum shutdown_how);
 
