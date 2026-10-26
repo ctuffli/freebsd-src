@@ -29,21 +29,22 @@
 #include <sys/param.h>
 #include <sys/bus.h>
 #include <sys/domain.h>
-#include <sys/lock.h>
-#include <sys/poll.h>
+#include <sys/file.h>
 #include <sys/kernel.h>
-#include <sys/types.h>
+#include <sys/lock.h>
 #include <sys/malloc.h>
 #include <sys/module.h>
 #include <sys/mutex.h>
+#include <sys/poll.h>
 #include <sys/proc.h>
 #include <sys/protosw.h>
+#include <sys/sockbuf.h>
 #include <sys/socket.h>
 #include <sys/sysctl.h>
 #include <sys/sysproto.h>
 #include <sys/systm.h>
-#include <sys/sockbuf.h>
 #include <sys/sx.h>
+#include <sys/types.h>
 #include <sys/uio.h>
 
 #include <net/vnet.h>
@@ -51,6 +52,8 @@
 #include <dev/hyperv/vmbus/vmbus_reg.h>
 
 #include "hv_sock.h"
+#include "sys/event.h"
+#include "sys/socketvar.h"
 
 #define HVSOCK_DBG_NONE			0x0
 #define HVSOCK_DBG_INFO			0x1
@@ -106,6 +109,7 @@ static struct protosw hv_socket_protosw = {
 	.pr_detach =		hvs_trans_detach,
 	.pr_shutdown =		hvs_trans_shutdown,
 	.pr_abort =		hvs_trans_abort,
+	.pr_kqfilter =		hvs_trans_kqfilter,
 };
 
 static struct domain		hv_socket_domain = {
@@ -135,6 +139,32 @@ static uint32_t		hvsock_canwrite_check(struct hvs_pcb *);
 static int		hvsock_send_data(struct vmbus_channel *chan,
     struct uio *uio, uint32_t to_write, struct sockbuf *sb);
 
+static int		hvsock_filt_soread(struct knote *, long);
+static int		hvsock_filt_sowrite(struct knote *, long);
+static int		hvsock_filt_soempty(struct knote *, long);
+static void		hvsock_filt_sordetach(struct knote *);
+static void		hvsock_filt_sowdetach(struct knote *);
+
+static const struct filterops hvs_read_filtops = {
+	.f_isfd = 1,
+	.f_detach = hvsock_filt_sordetach,
+	.f_event = hvsock_filt_soread,
+	.f_copy = knote_triv_copy,
+};
+
+static const struct filterops hvs_write_filtops = {
+	.f_isfd = 1,
+	.f_detach = hvsock_filt_sowdetach,
+	.f_event = hvsock_filt_sowrite,
+	.f_copy = knote_triv_copy,
+};
+
+static const struct filterops hvs_empty_filtops = {
+	.f_isfd = 1,
+	.f_detach = hvsock_filt_sowdetach,
+	.f_event = hvsock_filt_soempty,
+	.f_copy = knote_triv_copy,
+};
 
 
 /* Globals */
@@ -1054,6 +1084,49 @@ hvs_trans_abort(struct socket *so)
 }
 
 int
+hvs_trans_kqfilter(struct socket *so, struct knote *kn)
+{
+	struct sockbuf *sb;
+	sb_which which;
+	struct knlist *knl;
+
+	switch (kn->kn_filter) {
+	case EVFILT_READ:
+		kn->kn_fop = &hvs_read_filtops;
+		knl = &so->so_rdsel.si_note;
+		sb = &so->so_rcv;
+		which = SO_RCV;
+		break;
+	case EVFILT_WRITE:
+		kn->kn_fop = &hvs_write_filtops;
+		knl = &so->so_wrsel.si_note;
+		sb = &so->so_snd;
+		which = SO_SND;
+		break;
+	case EVFILT_EMPTY:
+		kn->kn_fop = &hvs_empty_filtops;
+		knl = &so->so_wrsel.si_note;
+		sb = &so->so_snd;
+		which = SO_SND;
+		break;
+	default:
+		return (EINVAL);
+	}
+
+	SOCK_LOCK(so);
+	if (SOLISTENING(so)) {
+		knlist_add(knl, kn, 1);
+	} else {
+		SOCK_BUF_LOCK(so, which);
+		knlist_add(knl, kn, 1);
+		sb->sb_flags |= SB_KNOTE;
+		SOCK_BUF_UNLOCK(so, which);
+	}
+	SOCK_UNLOCK(so);
+	return (0);
+}
+
+int
 hvs_trans_shutdown(struct socket *so, enum shutdown_how how)
 {
 	struct hvs_pcb *pcb = so2hvspcb(so);
@@ -1484,6 +1557,136 @@ hvsock_poll_readable(struct hvs_pcb *pcb)
 		return (true);
 
 	return (hvsock_have_packet(pcb, &advance));
+}
+
+static int
+hvsock_filt_soread(struct knote *kn, long hint)
+{
+	struct socket *so = kn->kn_fp->f_data;
+	struct hvs_pcb *pcb;
+
+	if (SOLISTENING(so)) {
+		kn->kn_data = so->sol_qlen;
+		if (so->so_error) {
+			kn->kn_flags |= EV_EOF;
+			kn->kn_fflags = so->so_error;
+			return (1);
+		}
+		return (!TAILQ_EMPTY(&so->sol_comp));
+	}
+
+	SOCK_RECVBUF_LOCK_ASSERT(so);
+
+	if (so->so_rcv.sb_state & SBS_CANTRCVMORE) {
+		kn->kn_flags |= EV_EOF;
+		kn->kn_fflags = so->so_error;
+		return (1);
+	} else if (so->so_error || so->so_rerror)
+		return (1);
+
+	pcb = so2hvspcb(so);
+	if (pcb == NULL) {
+		kn->kn_flags |= EV_EOF;
+		return (1);
+	}
+
+	if (!hvsock_poll_readable(pcb))
+		return (0);
+
+	kn->kn_data = pcb->recv_data_len > 0 ? pcb->recv_data_len : 1;
+	return (1);
+}
+
+static int
+hvsock_filt_sowrite(struct knote *kn, long hint)
+{
+	struct socket *so = kn->kn_fp->f_data;
+	struct hvs_pcb *pcb;
+
+
+	if (SOLISTENING(so))
+		return (0);
+
+	SOCK_SENDBUF_LOCK_ASSERT(so);
+
+	pcb = so2hvspcb(so);
+	kn->kn_data = hvsock_canwrite_check(pcb);
+
+	if (so->so_snd.sb_state & SBS_CANTSENDMORE) {
+		kn->kn_flags |= EV_EOF;
+		kn->kn_fflags = so->so_error;
+		return (1);
+	} else if (so->so_error)	/* temporary udp error */
+		return (1);
+	else if ((((so->so_state & SS_ISCONNECTED) == 0) &&
+	    (so->so_proto->pr_flags & PR_CONNREQUIRED))
+	    || (pcb == NULL))
+		return (0);
+	else if (kn->kn_sfflags & NOTE_LOWAT)
+		return (kn->kn_data >= kn->kn_sdata);
+	else
+		return (kn->kn_data >= so->so_snd.sb_lowat);
+}
+
+static int
+hvsock_filt_soempty(struct knote *kn, long hint)
+{
+	struct socket *so = kn->kn_fp->f_data;
+	struct hvs_pcb *pcb = so2hvspcb(so);
+
+	if (SOLISTENING(so) || (pcb == NULL))
+		return (1);
+
+	SOCK_SENDBUF_LOCK_ASSERT(so);
+	kn->kn_data = hvsock_canwrite_check(pcb); // XXX is this right?!?
+
+	return (kn->kn_data == 0 ? 1 : 0);
+}
+
+static void
+hvsock_knl_lock(struct socket *so, sb_which which)
+{
+retry:
+	if (SOLISTENING(so))
+		SOLISTEN_LOCK(so);
+	else {
+		SOCK_BUF_LOCK(so, which);
+		if (__predict_false(SOLISTENING(so))) {
+			SOCK_BUF_UNLOCK(so, which);
+			goto retry;
+		}
+	}
+}
+
+static void
+hvsock_knl_unlock(struct socket *so, sb_which which)
+{
+	if (SOLISTENING(so))
+		SOLISTEN_UNLOCK(so);
+	else
+		SOCK_BUF_UNLOCK(so, which);
+}
+
+static void
+hvsock_filt_sordetach(struct knote *kn)
+{
+	struct socket *so = kn->kn_fp->f_data;
+
+	hvsock_knl_lock(so, SO_RCV);
+	knlist_remove(&so->so_rdsel.si_note, kn, 1);
+	if (!SOLISTENING(so) && knlist_empty(&so->so_rdsel.si_note))
+		so->so_rcv.sb_flags &= ~SB_KNOTE;
+	hvsock_knl_unlock(so, SO_RCV);
+}
+
+static void
+hvsock_filt_sowdetach(struct knote *kn)
+{
+	struct socket *so = kn->kn_fp->f_data;
+
+	hvsock_knl_lock(so, SO_SND);
+	knlist_remove(&so->so_wrsel.si_note, kn, 1);
+	hvsock_knl_unlock(so, SO_SND);
 }
 
 static void
