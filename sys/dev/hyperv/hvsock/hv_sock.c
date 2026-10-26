@@ -127,6 +127,7 @@ static const struct hyperv_guid srv_id_template = {
 };
 
 static int		hvsock_br_callback(void *, int, void *);
+static bool		hvsock_poll_readable(struct hvs_pcb *);
 static uint32_t		hvsock_canread_check(struct hvs_pcb *);
 static uint32_t		hvsock_canwrite_check(struct hvs_pcb *);
 static int		hvsock_send_data(struct vmbus_channel *chan,
@@ -1233,6 +1234,58 @@ hvsock_send_data(struct vmbus_channel *chan, struct uio *uio,
 	return (error);
 }
 
+static bool
+hvsock_have_packet(struct hvs_pcb *pcb, uint32_t *advancep)
+{
+	uint32_t bytes_canread = 0;
+	int error;
+
+	if (pcb->rb_init)
+		*advancep =
+		    VMBUS_CHANPKT_GETLEN(pcb->hvs_pkt.chan_pkt_hdr.cph_tlen);
+	else
+		*advancep = 0;
+
+	bytes_canread = vmbus_chan_read_available(pcb->chan);
+
+	HVSOCK_DBG(HVSOCK_DBG_VERBOSE,
+	    "%s: bytes_canread on br = %u, advance = %u\n",
+	    __func__, bytes_canread, *advancep);
+
+	if (pcb->rb_init && bytes_canread == (*advancep + sizeof(uint64_t))) {
+		/*
+		 * Nothing to read. Need to advance the rindex before
+		 * calling sbwait, so host knows to wake us up when data
+		 * is available to read on rb.
+		 */
+		error = vmbus_chan_recv_idxadv(pcb->chan, *advancep);
+		if (error) {
+			HVSOCK_DBG(HVSOCK_DBG_ERR,
+			    "%s: after calling vmbus_chan_recv_idxadv, "
+			    "got error = %d\n",  __func__, error);
+			return (false);
+		}
+
+		pcb->rb_init = false;
+		pcb->recv_data_len = 0;
+		pcb->recv_data_off = 0;
+		bytes_canread = vmbus_chan_read_available(pcb->chan);
+
+		HVSOCK_DBG(HVSOCK_DBG_VERBOSE,
+		    "%s: advanced %u bytes, "
+		    " bytes_canread on br now = %u\n",
+		    __func__, *advancep, bytes_canread);
+
+		if (bytes_canread == 0)
+			return (false);
+
+		*advancep = 0;
+	}
+
+	return (bytes_canread >=
+	    *advancep + (sizeof(struct hvs_pkt_header) + sizeof(uint64_t)));
+}
+
 /*
  * Check if we have data on current ring buffer to read
  * or not. If not, advance the ring buffer read index to
@@ -1245,7 +1298,6 @@ hvsock_canread_check(struct hvs_pcb *pcb)
 {
 	uint32_t advance;
 	uint32_t tlen, hlen, dlen;
-	uint32_t bytes_canread = 0;
 	int error;
 
 	if (pcb == NULL || pcb->chan == NULL) {
@@ -1258,50 +1310,7 @@ hvsock_canread_check(struct hvs_pcb *pcb)
 	if (pcb->recv_data_len > 0)
 		return (pcb->recv_data_len);
 
-	if (pcb->rb_init)
-		advance =
-		    VMBUS_CHANPKT_GETLEN(pcb->hvs_pkt.chan_pkt_hdr.cph_tlen);
-	else
-		advance = 0;
-
-	bytes_canread = vmbus_chan_read_available(pcb->chan);
-
-	HVSOCK_DBG(HVSOCK_DBG_VERBOSE,
-	    "%s: bytes_canread on br = %u, advance = %u\n",
-	    __func__, bytes_canread, advance);
-
-	if (pcb->rb_init && bytes_canread == (advance + sizeof(uint64_t))) {
-		/*
-		 * Nothing to read. Need to advance the rindex before
-		 * calling sbwait, so host knows to wake us up when data
-		 * is available to read on rb.
-		 */
-		error = vmbus_chan_recv_idxadv(pcb->chan, advance);
-		if (error) {
-			HVSOCK_DBG(HVSOCK_DBG_ERR,
-			    "%s: after calling vmbus_chan_recv_idxadv, "
-			    "got error = %d\n",  __func__, error);
-			return (0);
-		} else {
-			pcb->rb_init = false;
-			pcb->recv_data_len = 0;
-			pcb->recv_data_off = 0;
-			bytes_canread = vmbus_chan_read_available(pcb->chan);
-
-			HVSOCK_DBG(HVSOCK_DBG_VERBOSE,
-			    "%s: advanced %u bytes, "
-			    " bytes_canread on br now = %u\n",
-			    __func__, advance, bytes_canread);
-
-			if (bytes_canread == 0)
-				return (0);
-			else
-				advance = 0;
-		}
-	}
-
-	if (bytes_canread <
-	    advance + (sizeof(struct hvs_pkt_header) + sizeof(uint64_t)))
+	if (!hvsock_have_packet(pcb, &advance))
 		return (0);
 
 	error = vmbus_chan_recv_peek(pcb->chan, &pcb->hvs_pkt,
@@ -1386,6 +1395,20 @@ hvsock_canwrite_check(struct hvs_pcb *pcb)
 	    "%s: available size is %u\n", __func__, rounddown2(ret, 8));
 
 	return (rounddown2(ret, 8));
+}
+
+static bool
+hvsock_poll_readable(struct hvs_pcb *pcb)
+{
+	uint32_t advance;
+
+	if (pcb->chan == NULL)
+		return (false);
+
+	if (pcb->recv_data_len > 0)
+		return (true);
+
+	return (hvsock_have_packet(pcb, &advance));
 }
 
 static void
